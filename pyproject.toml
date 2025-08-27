@@ -1,5 +1,5 @@
 [project]
-name = "conversational-markov"
+name = "convmark"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
