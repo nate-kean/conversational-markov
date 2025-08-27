@@ -1,5 +1,7 @@
+import concurrent.futures
 import json
 from pathlib import Path
+from typing import Literal
 
 import markovify
 import sqlalchemy as sa
@@ -17,6 +19,9 @@ DB_URL = (
 )
 SEQUENCES_PATH = Path("convmark/my_corpus/sequences")
 
+GARLIC_OS_MENTION = "<@206235904644349953>"
+CROMGIS_MENTION = "<@767799292156706847>"
+
 
 def remove_log(corpus: list[list[str]], state: markovify.chain.State) -> None:
 	for i, log in enumerate(corpus):
@@ -25,10 +30,11 @@ def remove_log(corpus: list[list[str]], state: markovify.chain.State) -> None:
 
 
 def insert_sequence(corpus: list[list[str]], sequence_path: Path) -> None:
-	prompt = ("", "")
+	prompt = (c.WILDCARD, c.WILDCARD)
 	with sequence_path.open(encoding="utf-8") as fin:
 		for line in fin:
-			if len(line.strip()) == 0:
+			line = line.strip()
+			if len(line) == 0:
 				continue
 			corpus.append([*prompt, c.RESPONSE, line])
 			prompt = c.encode_prompt(line)
@@ -41,19 +47,63 @@ def try_del_val(corpus: list[list[str]], val: list[str]) -> None:
 		pass
 
 
+def replace_token(
+	corpus: list[list[str]],
+	old: str,
+	new: str,
+	*,
+	where: Literal["prompt", "response", "both"],
+) -> None:
+	old = old.lower()
+	match where:
+		case "both":
+			def process_run(run: list[str]) -> None:
+				for i, token in enumerate(run):
+					if token == old:
+						run[i] = new
+		case "prompt":
+			def process_run(run: list[str]) -> None:
+				for i, token in enumerate(run):
+					if token == c.RESPONSE:
+						break
+					if token == old:
+						run[i] = new
+		case "response":
+			def process_run(run: list[str]) -> None:
+				found_sentinel = False
+				for i, token in enumerate(run):
+					found_sentinel = found_sentinel or token == c.RESPONSE
+					if not found_sentinel:
+						continue
+					if token == old:
+						run[i] = new
+	with concurrent.futures.ThreadPoolExecutor() as executor:
+		executor.map(process_run, corpus)
+
+
+
 def perform_manual_corrections(corpus: list[list[str]]) -> None:
 	# in place
 	try_del_val(corpus, ["plants", c.WILDCARD, c.RESPONSE, "shrimp"])
 	try_del_val(corpus, ["tendrils", c.WILDCARD, c.RESPONSE, "plants"])
 	try_del_val(corpus, ["shrimp", c.WILDCARD, c.RESPONSE, "tendrils"])
 	try_del_val(corpus, ["🌱", c.WILDCARD, c.RESPONSE, "🦐"])
-	try_del_val(corpus, ["<:tendrils:585579718737395732>", c.WILDCARD, c.RESPONSE, "🌱"])
-	try_del_val(corpus, ["🦐", c.WILDCARD, c.RESPONSE, "<:tendrils:585579718737395732>"])
+	try_del_val(
+		corpus, ["<:tendrils:585579718737395732>", c.WILDCARD, c.RESPONSE, "🌱"]
+	)
+	try_del_val(
+		corpus, ["🦐", c.WILDCARD, c.RESPONSE, "<:tendrils:585579718737395732>"]
+	)
 	for path in SEQUENCES_PATH.glob("*.txt"):
 		insert_sequence(corpus, path)
+	for token in ("garlicOS", "garlicOS®"):
+		replace_token(corpus, token, "cromgis", where="both")
+	replace_token(corpus, GARLIC_OS_MENTION, CROMGIS_MENTION, where="prompt")
 	corpus.append(["some", c.WILDCARD, c.RESPONSE, "body"])
 	corpus.append(["body", c.WILDCARD, c.RESPONSE, "once"])
-	corpus.append(["once", c.WILDCARD, c.RESPONSE, "told me the world was gonna roll me"])
+	corpus.append(
+		["once", c.WILDCARD, c.RESPONSE, "told me the world was gonna roll me"]
+	)
 
 
 def generate_corpus() -> list[list[str]]:
@@ -122,20 +172,20 @@ def generate_corpus() -> list[list[str]]:
 
 
 def main() -> None:
-	# corpus = generate_corpus()
-	# with open("convmark.json", "w") as fout:
-	# 	json.dump(corpus, fout)
+	corpus = generate_corpus()
+	with open("convmark.json", "w") as fout_raw_corpus:
+		json.dump(corpus, fout_raw_corpus)
 
-	# with open("convmark.json") as fin:
-	# 	corpus: list[list[str]] = json.load(fin)
+	# with open("convmark.json") as fin_raw_corpus:
+	# 	corpus: list[list[str]] = json.load(fin_raw_corpus)
 
-	# perform_manual_corrections(corpus)
+	perform_manual_corrections(corpus)
 
-	# with open("convmark.json", "w") as fout:
-	# 	json.dump(corpus, fout)
+	with open("convmark.json", "w") as fout_finished_corpus:
+		json.dump(corpus, fout_finished_corpus)
 
-	with open("convmark.json") as fin:
-		corpus: list[list[str]] = json.load(fin)
+	# with open("convmark.json") as fin_finished_corpus:
+	# 	corpus: list[list[str]] = json.load(fin_finished_corpus)
 
 	model = c.ConvMark(corpus)
 
