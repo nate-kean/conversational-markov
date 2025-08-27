@@ -1,9 +1,9 @@
 import concurrent.futures
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
-import markovify
 import sqlalchemy as sa
 import sqlmodel as sm
 from tqdm import tqdm
@@ -18,15 +18,10 @@ DB_URL = (
 	"conversational-markov/convmark.sqlite3"
 )
 SEQUENCES_PATH = Path("convmark/my_corpus/sequences")
+BANNED_TOKENS_PATH = Path("convmark/my_corpus/banned.txt")
 
 GARLIC_OS_MENTION = "<@206235904644349953>"
 CROMGIS_MENTION = "<@767799292156706847>"
-
-
-def remove_log(corpus: list[list[str]], state: markovify.chain.State) -> None:
-	for i, log in enumerate(corpus):
-		if log[0] == state[0] and log[1] == state[1]:
-			del corpus[i]
 
 
 def insert_sequence(corpus: list[list[str]], sequence_path: Path) -> None:
@@ -44,7 +39,21 @@ def try_del_val(corpus: list[list[str]], val: list[str]) -> None:
 	try:
 		del corpus[corpus.index(val)]
 	except ValueError:
-		pass
+		return
+	print("Removed:", val)
+
+
+def delete_token(
+	corpus: list[list[str]],
+	token: str,
+	*,
+	where: Literal["prompt", "response", "anywhere"],
+) -> None:
+	def _do_delete(run: list[str], index: int) -> None:
+		print("Removed:", run[index])
+		del run[index]
+
+	act_on_token(corpus, token, where=where, action=_do_delete)
 
 
 def replace_token(
@@ -52,38 +61,55 @@ def replace_token(
 	old: str,
 	new: str,
 	*,
-	where: Literal["prompt", "response", "both"],
+	where: Literal["prompt", "response", "anywhere"],
 ) -> None:
-	old = old.lower()
+	def _do_replace(run: list[str], index: int) -> None:
+		print("Replaced:", run[index], "with:", new)
+		run[index] = new
+
+	act_on_token(corpus, old, where=where, action=_do_replace)
+
+
+def act_on_token(
+	corpus: list[list[str]],
+	token: str,
+	*,
+	where: Literal["prompt", "response", "anywhere"],
+	action: Callable[[list[str], int], None],
+) -> None:
+	token = token.lower()
 	match where:
-		case "both":
+		case "anywhere":
+
 			def process_run(run: list[str]) -> None:
-				for i, token in enumerate(run):
-					if token == old:
-						run[i] = new
+				for i, cand_token in enumerate(run):
+					if cand_token == token:
+						action(run, i)
 		case "prompt":
+
 			def process_run(run: list[str]) -> None:
-				for i, token in enumerate(run):
-					if token == c.RESPONSE:
+				for i, cand_token in enumerate(run):
+					if cand_token == c.RESPONSE:
 						break
-					if token == old:
-						run[i] = new
+					if cand_token == token:
+						action(run, i)
 		case "response":
+
 			def process_run(run: list[str]) -> None:
 				found_sentinel = False
-				for i, token in enumerate(run):
-					found_sentinel = found_sentinel or token == c.RESPONSE
+				for i, cand_token in enumerate(run):
+					found_sentinel = found_sentinel or cand_token == c.RESPONSE
 					if not found_sentinel:
 						continue
-					if token == old:
-						run[i] = new
+					if cand_token == token:
+						action(run, i)
+
 	with concurrent.futures.ThreadPoolExecutor() as executor:
 		executor.map(process_run, corpus)
 
 
-
 def perform_manual_corrections(corpus: list[list[str]]) -> None:
-	# in place
+	# does everything in place
 	try_del_val(corpus, ["plants", c.WILDCARD, c.RESPONSE, "shrimp"])
 	try_del_val(corpus, ["tendrils", c.WILDCARD, c.RESPONSE, "plants"])
 	try_del_val(corpus, ["shrimp", c.WILDCARD, c.RESPONSE, "tendrils"])
@@ -97,7 +123,13 @@ def perform_manual_corrections(corpus: list[list[str]]) -> None:
 	for path in SEQUENCES_PATH.glob("*.txt"):
 		insert_sequence(corpus, path)
 	for token in ("garlicOS", "garlicOS®"):
-		replace_token(corpus, token, "cromgis", where="both")
+		replace_token(corpus, token, "cromgis", where="anywhere")
+	with BANNED_TOKENS_PATH.open() as fin:
+		for token in fin:
+			token = token.strip()
+			if len(token) == 0:
+				continue
+			delete_token(corpus, token, where="anywhere")
 	replace_token(corpus, GARLIC_OS_MENTION, CROMGIS_MENTION, where="prompt")
 	corpus.append(["some", c.WILDCARD, c.RESPONSE, "body"])
 	corpus.append(["body", c.WILDCARD, c.RESPONSE, "once"])
